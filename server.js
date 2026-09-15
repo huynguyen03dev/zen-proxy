@@ -416,23 +416,62 @@ async function passthrough(req, res, upstreamPath) {
   res.on("close", () => ac.abort())
 
   try {
-    const upstream = await upstreamFetch(upstreamPath, {
-      method: req.method,
-      body: raw.length > 0 ? raw : undefined,
-      sessionID,
-      ac,
-      label: upstreamPath,
-    })
-    if (!upstream) {
-      log(req.method, upstreamPath, undefined, 502, performance.now() - t0, "all keys failed")
-      return oaiError(res, 502, "zen-proxy: all upstream keys failed", "api_error")
+    // zen rejects unknown tool types (e.g. codex clients sending image_generation
+    // to models that only support functions). on such a 400, drop the offending
+    // tool type and retry instead of failing the request.
+    for (let attempt = 0; ; attempt++) {
+      const upstream = await upstreamFetch(upstreamPath, {
+        method: req.method,
+        body: raw.length > 0 ? raw : undefined,
+        sessionID,
+        ac,
+        label: upstreamPath,
+      })
+      if (!upstream) {
+        log(req.method, upstreamPath, undefined, 502, performance.now() - t0, "all keys failed")
+        return oaiError(res, 502, "zen-proxy: all upstream keys failed", "api_error")
+      }
+
+      let retry = false
+      if (!upstream.ok && upstream.status === 400 && attempt < 4 && raw.length > 0) {
+        const text = await upstream.text().catch(() => "")
+        const bad = text.match(/Unsupported tool type: '"([^"]+)"'/)
+        if (bad) {
+          const stripped = stripToolType(raw, bad[1])
+          if (stripped) {
+            raw = stripped
+            retry = true
+            log(req.method, upstreamPath, undefined, 400, performance.now() - t0, `retry w/o tool type=${bad[1]}`)
+          }
+        }
+        if (retry) continue
+        // body already consumed — replay it as the response
+        res.writeHead(upstream.status, { ...CORS, "content-type": "application/json" })
+        return res.end(text)
+      }
+
+      log(req.method, upstreamPath, undefined, upstream.status, performance.now() - t0)
+      const headers = { ...CORS, "content-type": upstream.headers.get("content-type") ?? "application/json" }
+      res.writeHead(upstream.status, headers)
+      Readable.fromWeb(upstream.body).pipe(res)
+      return
     }
-    log(req.method, upstreamPath, undefined, upstream.status, performance.now() - t0)
-    const headers = { ...CORS, "content-type": upstream.headers.get("content-type") ?? "application/json" }
-    res.writeHead(upstream.status, headers)
-    Readable.fromWeb(upstream.body).pipe(res)
   } catch (e) {
     if (!res.writableEnded) return oaiError(res, 502, `zen-proxy: ${e.message === "upstream timeout" ? "upstream timeout" : "upstream unreachable"}`, "api_error")
+  }
+}
+
+/** remove tools[].type === badType from a JSON body; null when nothing changed */
+function stripToolType(raw, badType) {
+  try {
+    const obj = JSON.parse(raw.toString("utf8"))
+    if (!Array.isArray(obj.tools)) return null
+    const filtered = obj.tools.filter((t) => t?.type !== badType)
+    if (filtered.length === obj.tools.length) return null
+    obj.tools = filtered
+    return Buffer.from(JSON.stringify(obj))
+  } catch {
+    return null
   }
 }
 
