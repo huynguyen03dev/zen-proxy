@@ -42,13 +42,15 @@ disappear automatically. Overrides:
 
 | Mode | session id (`x-opencode-session`) | project id (`x-opencode-project`) |
 | --- | --- | --- |
-| `derived` *(default)* | `HMAC(secret, "ses:<UTC date>")` — same UTC day → same id | `HMAC(secret, "proj:<ISO week>")` — same week → same id |
+| `derived` *(default)* | `HMAC(seed, "ses:<UTC date>")` — same UTC day → same id | `HMAC(seed, "proj:<ISO week>")` — same week → same id |
 | `sticky` | one per conversation (`X-Conversation-Id` header / body `user`), 30 min idle TTL | static, random at boot or `OPENCODE_PROJECT_ID` |
 | `per-request` | fresh every call | static |
 
-`x-opencode-request` is always fresh. Derived ids survive restarts and Render
-redeploys as long as `OPENCODE_SECRET` (or `PROXY_KEY`) is set — same secret +
-same day = same id, deterministic. Inspect live values at `GET /debug/ids`.
+`x-opencode-request` is always fresh. The seed is **unique per deployment**:
+`OPENCODE_SECRET` (if set) → `RENDER_SERVICE_ID` (Render auto-provides, unique
+per service, survives redeploys) → random at boot. Two instances sharing a
+proxy key never share identity. Inspect live values at `GET /debug/ids`
+(includes `seed_source`).
 
 
 ## Run locally
@@ -73,7 +75,7 @@ DEBUG_IDS=1 node server.js                   # log session id per chat request
 | --- | --- | --- |
 | `PORT` | `8787` | listen port |
 | `PROXY_KEY` | unset (= open) | clients must send `Authorization: Bearer <key>` or `X-Proxy-Key` |
-| `OPENCODE_SECRET` | `PROXY_KEY` / random | seed for derived ids; set it on Render so ids survive redeploys |
+| `OPENCODE_SECRET` | `RENDER_SERVICE_ID` / random | manual seed override — on Render leave it unset and each service gets its own stable identity |
 | `ZEN_UPSTREAM` | `https://opencode.ai/zen/v1` | upstream base URL |
 | `ZEN_API_KEYS` | `public` | key chain thử theo thứ tự, phân cách bởi dấu phẩy (fallback: `ZEN_API_KEY`) |
 | `FAILOVER_COOLDOWN_MS` | `60000` | thời gian bỏ qua key vừa fail (0 = tắt) |

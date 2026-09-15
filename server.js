@@ -22,10 +22,11 @@
  *
  * Identity strategy (SESSION_MODE):
  *   "derived"     deterministic time-bucketed ids (default):
- *                 session = HMAC(secret, "ses:<UTC date>")   -> same day, same id
- *                 project = HMAC(secret, "proj:<ISO week>")  -> same week, same id
- *                 request = random per call. Survives restarts/redeploys as
- *                 long as OPENCODE_SECRET (or PROXY_KEY) is set.
+ *                 session = HMAC(seed, "ses:<UTC date>")   -> same day, same id
+ *                 project = HMAC(seed, "proj:<ISO week>")  -> same week, same id
+ *                 seed = OPENCODE_SECRET || RENDER_SERVICE_ID || random-at-boot,
+ *                 so each deployment gets its OWN stable identity — two
+ *                 instances sharing a proxy key never collide.
  *   "sticky"      one ses_ per conversation key, TTL-refreshed
  *   "per-request" fresh ses_ every call
  *
@@ -33,8 +34,8 @@
  *   PORT                 listen port                    (default 8787)
  *   PROXY_KEY            require `Authorization: Bearer <key>` / `X-Proxy-Key`
  *                        from clients. UNSET = open proxy (only sane on localhost)
- *   OPENCODE_SECRET      seed for derived ids           (default: PROXY_KEY,
- *                        else random at boot -> ids then change on restart)
+ *   OPENCODE_SECRET      seed for derived ids; unset on Render = RENDER_SERVICE_ID
+ *                        (unique per service); locally = random per boot
  *   ZEN_UPSTREAM         upstream base URL              (default https://opencode.ai/zen/v1)
  *   ZEN_API_KEYS         comma list tried in order      (default "public";
  *                        falls back to ZEN_API_KEY if set)
@@ -100,10 +101,17 @@ function rid(prefix) {
   return `${prefix}_${ts}${r}`
 }
 
-const SECRET = process.env.OPENCODE_SECRET?.trim() || PROXY_KEY || rid("secret")
-if (!process.env.OPENCODE_SECRET && !PROXY_KEY) {
-  console.warn("warn: no OPENCODE_SECRET/PROXY_KEY -> derived ids change on every restart")
-}
+// identity seed: unique per instance. OPENCODE_SECRET wins if set; otherwise
+// Render's per-service RENDER_SERVICE_ID (stable across redeploys, differs per
+// service); locally a random seed. PROXY_KEY intentionally NOT used — instances
+// sharing a proxy key must not share identity.
+const SECRET =
+  process.env.OPENCODE_SECRET?.trim() || process.env.RENDER_SERVICE_ID || rid("seed")
+const SEED_SOURCE = process.env.OPENCODE_SECRET?.trim()
+  ? "env"
+  : process.env.RENDER_SERVICE_ID
+    ? "render-service"
+    : "random-boot"
 
 /** same UTC day -> same id */
 function utcDay(d = new Date()) {
@@ -417,6 +425,7 @@ async function handle(req, res) {
       project_id: projectIDFor(),
       session_id: sessionFor("default"),
       request_id: rid("req"),
+      seed_source: SEED_SOURCE,
       keys: KEYS.map((k, i) => ({ index: i, key: maskKey(k), cooling_until: cooldown.get(i) ?? null })),
       catalog_free: freeSet.size,
       catalog_loaded_at: catalogLoadedAt ? new Date(catalogLoadedAt).toISOString() : null,
