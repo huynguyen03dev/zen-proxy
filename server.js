@@ -435,7 +435,7 @@ async function passthrough(req, res, upstreamPath) {
       let retry = false
       if (!upstream.ok && upstream.status === 400 && attempt < 4 && raw.length > 0) {
         const text = await upstream.text().catch(() => "")
-        const bad = text.match(/Unsupported tool type: '"([^"]+)"'/)
+        const bad = text.match(/Unsupported tool type: '([^']+)'/)
         if (bad) {
           const stripped = stripToolType(raw, bad[1])
           if (stripped) {
