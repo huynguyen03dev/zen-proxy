@@ -86,7 +86,14 @@ const EXTRA_MODELS = (process.env.EXTRA_MODELS ?? "")
 
 const ALLOW_EXPLICIT = ALLOW_MODELS && ALLOW_MODELS !== "*" ? ALLOW_MODELS.split(",").map((s) => s.trim()) : undefined
 const BODY_LIMIT = 10 * 1024 * 1024
-const USER_AGENT = `opencode/${CHANNEL}/${VERSION}/${CLIENT}`
+// UA mimics a real opencode install (per-route, captured from opencode 1.3.0):
+// chat/completions goes through @ai-sdk/openai-compatible, /responses through
+// @ai-sdk/openai. OPENCODE_USER_AGENT overrides both if you need an exact match.
+const UA_SDK_CHAT = process.env.OPENCODE_USER_AGENT?.trim()
+  || "ai-sdk/openai-compatible/1.0.32 ai-sdk/provider-utils/3.0.20 runtime/bun/1.3.10"
+const UA_SDK_RESPONSES = process.env.OPENCODE_USER_AGENT?.trim()
+  || "ai-sdk/openai/2.0.89 ai-sdk/provider-utils/3.0.20 runtime/bun/1.3.10"
+const UA_OPENCODE = `opencode/${CHANNEL}/${VERSION}/${CLIENT}`
 /** key-level failures worth cooling a key down for; other errors just fail over */
 const KEY_COOLDOWN_STATUS = (s) => s === 429 || s >= 500
 
@@ -171,7 +178,7 @@ let catalogLoadedAt = 0
 async function refreshCatalog() {
   try {
     const res = await fetch(CATALOG_URL, {
-      headers: { "user-agent": USER_AGENT, accept: "application/json" },
+      headers: { "user-agent": UA_OPENCODE, accept: "application/json" },
       signal: AbortSignal.timeout(30_000),
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -215,7 +222,7 @@ function authorized(req) {
   return req.headers.authorization === `Bearer ${PROXY_KEY}` || req.headers["x-proxy-key"] === PROXY_KEY
 }
 
-function zenHeaders(sessionID, apiKey) {
+function zenHeaders(sessionID, apiKey, ua = UA_SDK_CHAT) {
   return {
     authorization: `Bearer ${apiKey}`,
     "content-type": "application/json",
@@ -223,7 +230,7 @@ function zenHeaders(sessionID, apiKey) {
     "x-opencode-session": sessionID,
     "x-opencode-request": rid("req"),
     "x-opencode-client": CLIENT,
-    "user-agent": USER_AGENT,
+    "user-agent": ua,
   }
 }
 
@@ -246,7 +253,7 @@ const cooldown = new Map() // key index -> retry-after timestamp
  * only for key-level failures (429/5xx), so one bad model name doesn't shun a
  * healthy key. Returns the last attempt's Response (or null if network-dead).
  */
-async function upstreamFetch(path, { method = "GET", body, sessionID, ac, timeoutMs = TIMEOUT_MS, label = path }) {
+async function upstreamFetch(path, { method = "GET", body, sessionID, ac, timeoutMs = TIMEOUT_MS, label = path, ua }) {
   const candidates = pickKeys()
   let lastRes = null
   for (let n = 0; n < candidates.length; n++) {
@@ -255,7 +262,7 @@ async function upstreamFetch(path, { method = "GET", body, sessionID, ac, timeou
     try {
       const res = await fetch(`${UPSTREAM}${path}`, {
         method,
-        headers: zenHeaders(sessionID, KEYS[i]),
+        headers: zenHeaders(sessionID, KEYS[i], ua),
         body,
         signal,
       })
@@ -411,6 +418,7 @@ async function passthrough(req, res, upstreamPath) {
     return oaiError(res, 400, "request body too large (<=10MB)")
   }
   const sessionID = sessionFor(req.headers["x-conversation-id"] || "default")
+  const ua = upstreamPath.startsWith("/responses") ? UA_SDK_RESPONSES : UA_SDK_CHAT
 
   const ac = new AbortController()
   res.on("close", () => ac.abort())
@@ -426,6 +434,7 @@ async function passthrough(req, res, upstreamPath) {
         sessionID,
         ac,
         label: upstreamPath,
+        ua,
       })
       if (!upstream) {
         log(req.method, upstreamPath, undefined, 502, performance.now() - t0, "all keys failed")
