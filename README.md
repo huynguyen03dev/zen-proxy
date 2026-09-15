@@ -7,35 +7,37 @@ streams SSE passthrough, blocks non-free models.
 
 ## Key failover
 
-`ZEN_API_KEYS` là danh sách key thử theo thứ tự (mặc định `"public"`). Khi 1 request
-bị upstream trả `429 / 402 / 403 / 408 / 5xx` (hoặc lỗi mạng), proxy tự thử key
-tiếp theo **trong cùng request đó**. Key vừa fail bị đặt cooldown
-(`FAILOVER_COOLDOWN_MS`, mặc định 60s) — các request sau đi thẳng key còn sống,
-hết cooldown thì quay lại thử key trước.
+`ZEN_API_KEYS` là danh sách key thử theo thứ tự (mặc định `"public"`). **Bất kỳ
+lỗi nào** từ upstream (429, 401 với model paid, model không tồn tại, 5xx, lỗi
+mạng…) đều tự thử key tiếp theo **trong cùng request đó**. Riêng lỗi cấp key
+(`429` / `5xx` / lỗi mạng) mới đặt cooldown (`FAILOVER_COOLDOWN_MS`, mặc định
+60s) — lỗi cấp request (vd tên model sai) không làm key bị cool. Hết cooldown
+thì quay lại thử key trước.
 
 ```bash
 ZEN_API_KEYS="public,sk-your-real-key" node server.js   # public trước, key thật dự phòng
 ZEN_API_KEYS="sk-your-real-key" node server.js          # chỉ dùng key thật
 ```
 
-Lưu ý: có key thật trong chain **không tự mở** model paid — filter free-only vẫn
-giữ nguyên; muốn route model paid sang key thật thì set `ALLOW_MODELS="*"`.
+Vì chat là pass-through: gọi model paid khi chain có key thật sẽ tự fail-over
+sang key thật và **tính tiền** — key `public` chỉ đủ quyền cho model free.
 
-## Free-model blocking (how it works)
+## Model list (display only — chat is never blocked here)
 
-Not a suffix guess. Zen exposes no pricing, so the proxy reads the same catalog
-opencode itself loads — `models.opencode.ai/api.json` (`models-dev.ts` in the
-opencode repo), provider `opencode` — and allows a model only if
-`cost.input === 0 && cost.output === 0`, the exact rule opencode applies when it
-strips paid models for keyless users. What `/v1/models` returns is
-**catalog-free ∩ zen-live**, so entries the server dropped (e.g. `grok-code`)
-disappear automatically. Overrides:
+Zen exposes no pricing, so the proxy reads the same catalog opencode itself
+loads — `models.opencode.ai/api.json`, provider `opencode` — and `/v1/models`
+lists models with `cost.input === 0 && cost.output === 0` (the exact rule
+opencode applies for keyless users), intersected with the **live** zen list so
+entries the server dropped (e.g. `grok-code`) disappear automatically. It's a
+**hint, not a gate**: chat requests pass through untouched and zen decides what
+a key may call, so a brand-new model works the moment zen supports it — no
+redeploy, no wait. Overrides shape the display list only:
 
 | Var | Effect |
 | --- | --- |
-| `ALLOW_MODELS="a,b,c"` | explicit allowlist, checked first |
-| `ALLOW_MODELS="*"` | allow everything (paid included — careful) |
-| `EXTRA_MODELS="x,y"` | extra ids always allowed |
+| `ALLOW_MODELS="a,b,c"` | explicit display list, checked first |
+| `ALLOW_MODELS="*"` | show the full live list |
+| `EXTRA_MODELS="x,y"` | extra ids shown in free-only mode |
 | fallback | `-free` suffix heuristic until the catalog loads |
 
 ## Identity strategy (SESSION_MODE)

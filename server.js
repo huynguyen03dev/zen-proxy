@@ -8,17 +8,19 @@
  * This proxy injects those, filters to free models, and streams everything
  * else through untouched.
  *
- * Key failover: ZEN_API_KEYS is tried in order (default "public"). If an
- * upstream call hits a rate limit / server error / payment error, the next key
- * is tried within the same request. A key that just failed gets a cooldown so
- * later requests skip straight to the working key until the cooldown lapses.
+ * Key failover: ZEN_API_KEYS is tried in order (default "public"). Any upstream
+ * error (rate limit, unknown model, auth, 5xx…) moves the request to the next
+ * key within the same request. A key that hit a key-level failure (429/5xx,
+ * network) also gets a cooldown so later requests skip straight to the working
+ * key until the cooldown lapses; request-level errors (bad model name etc.)
+ * never cool a key down.
  *
- * Free-model detection: zen exposes no pricing, so the proxy reads the same
- * catalog opencode itself uses (models.opencode.ai/api.json, provider
- * "opencode") and allows models whose cost.input AND cost.output are 0 —
- * the exact rule opencode applies to strip paid models. Served list =
- * catalog-free ∩ zen-live. (A real key in the chain does NOT lift the filter;
- * set ALLOW_MODELS="*" if you want paid models routed to your key.)
+ * Model list: zen exposes no pricing, so the proxy reads the same catalog
+ * opencode itself uses (models.opencode.ai/api.json, provider "opencode")
+ * and /v1/models lists models whose cost.input AND cost.output are 0 —
+ * the exact rule opencode applies to strip paid models. It's a hint, not a
+ * gate: chat requests pass through untouched and zen decides what a key may
+ * call, so brand-new models work the moment zen supports them.
  *
  * Identity strategy (SESSION_MODE):
  *   "derived"     deterministic time-bucketed ids (default):
@@ -85,8 +87,8 @@ const EXTRA_MODELS = (process.env.EXTRA_MODELS ?? "")
 const ALLOW_EXPLICIT = ALLOW_MODELS && ALLOW_MODELS !== "*" ? ALLOW_MODELS.split(",").map((s) => s.trim()) : undefined
 const BODY_LIMIT = 10 * 1024 * 1024
 const USER_AGENT = `opencode/${CHANNEL}/${VERSION}/${CLIENT}`
-/** statuses worth burning a fallback key on */
-const RETRY_STATUS = (s) => s === 402 || s === 403 || s === 408 || s === 429 || s >= 500
+/** key-level failures worth cooling a key down for; other errors just fail over */
+const KEY_COOLDOWN_STATUS = (s) => s === 429 || s >= 500
 
 // ---------------------------------------------------------------------------
 // ids
@@ -193,6 +195,7 @@ async function refreshCatalog() {
 }
 
 function modelAllowed(id) {
+  // display-only filter for /v1/models; chat is never blocked here
   if (ALLOW_MODELS === "*") return true
   if (ALLOW_EXPLICIT) return ALLOW_EXPLICIT.includes(id)
   if (EXTRA_MODELS.includes(id)) return true
@@ -239,8 +242,9 @@ const cooldown = new Map() // key index -> retry-after timestamp
 
 /**
  * POST/GET against upstream with key failover.
- * Returns the first Response that is OK or not worth retrying; reads (and
- * discards) failed bodies so the returned response is always untouched.
+ * Any non-OK response moves to the next key; the failed key is put on cooldown
+ * only for key-level failures (429/5xx), so one bad model name doesn't shun a
+ * healthy key. Returns the last attempt's Response (or null if network-dead).
  */
 async function upstreamFetch(path, { method = "GET", body, sessionID, ac, timeoutMs = TIMEOUT_MS, label = path }) {
   const candidates = pickKeys()
@@ -255,10 +259,10 @@ async function upstreamFetch(path, { method = "GET", body, sessionID, ac, timeou
         body,
         signal,
       })
-      if (res.ok || !RETRY_STATUS(res.status) || n === candidates.length - 1) return res
+      if (res.ok || n === candidates.length - 1) return res
       const detail = await res.text().catch(() => "")
       console.warn(`key #${i} (${maskKey(KEYS[i])}) failed ${label}: ${res.status} ${detail.slice(0, 160)}`)
-      if (COOLDOWN_MS > 0) cooldown.set(i, Date.now() + COOLDOWN_MS)
+      if (COOLDOWN_MS > 0 && KEY_COOLDOWN_STATUS(res.status)) cooldown.set(i, Date.now() + COOLDOWN_MS)
       lastRes = res
     } catch (e) {
       if (ac.signal.aborted) throw e // client gone / global timeout — don't fail over
@@ -347,7 +351,9 @@ async function chatCompletions(req, res) {
 
   const model = typeof body?.model === "string" ? body.model : undefined
   if (!model) return oaiError(res, 400, "`model` is required")
-  if (!modelAllowed(model)) return oaiError(res, 403, `model "${model}" is not allowed by this proxy`)
+  // no allowlist here on purpose: /v1/models is only a hint of what should work;
+  // zen is the enforcer (unknown/non-free models get its own error passthrough).
+  // this way brand-new models work the moment zen supports them.
 
   // conversation key only matters in sticky mode
   const conversationKey = req.headers["x-conversation-id"] || (typeof body.user === "string" && body.user) || "default"
