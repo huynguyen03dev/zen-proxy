@@ -401,6 +401,41 @@ async function chatCompletions(req, res) {
   Readable.fromWeb(upstream.body).pipe(res) // SSE streams straight through
 }
 
+/** generic pass-through for any other /v1/* path (e.g. /v1/responses) */
+async function passthrough(req, res, upstreamPath) {
+  const t0 = performance.now()
+  let raw
+  try {
+    raw = await readBody(req)
+  } catch {
+    return oaiError(res, 400, "request body too large (<=10MB)")
+  }
+  const sessionID = sessionFor(req.headers["x-conversation-id"] || "default")
+
+  const ac = new AbortController()
+  res.on("close", () => ac.abort())
+
+  try {
+    const upstream = await upstreamFetch(upstreamPath, {
+      method: req.method,
+      body: raw.length > 0 ? raw : undefined,
+      sessionID,
+      ac,
+      label: upstreamPath,
+    })
+    if (!upstream) {
+      log(req.method, upstreamPath, undefined, 502, performance.now() - t0, "all keys failed")
+      return oaiError(res, 502, "zen-proxy: all upstream keys failed", "api_error")
+    }
+    log(req.method, upstreamPath, undefined, upstream.status, performance.now() - t0)
+    const headers = { ...CORS, "content-type": upstream.headers.get("content-type") ?? "application/json" }
+    res.writeHead(upstream.status, headers)
+    Readable.fromWeb(upstream.body).pipe(res)
+  } catch (e) {
+    if (!res.writableEnded) return oaiError(res, 502, `zen-proxy: ${e.message === "upstream timeout" ? "upstream timeout" : "upstream unreachable"}`, "api_error")
+  }
+}
+
 async function handle(req, res) {
   const path = new URL(req.url, "http://x").pathname.replace(/\/+$/, "") || "/"
 
@@ -450,6 +485,10 @@ async function handle(req, res) {
   }
 
   if (path === "/v1/chat/completions" && req.method === "POST") return chatCompletions(req, res)
+
+  // everything else under /v1/* (responses, completions, …) is raw passthrough
+  // with the same key failover — zen is the single source of truth for what works
+  if (path.startsWith("/v1/")) return passthrough(req, res, path.slice(3)) // /v1/x -> /x
 
   return oaiError(res, 404, `no route for ${req.method} ${path}`)
 }

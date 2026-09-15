@@ -94,6 +94,11 @@ DEBUG_IDS=1 node server.js                   # log session id per chat request
 
 ## Use it
 
+`/v1/chat/completions` + `/v1/models` are first-class; **any other `/v1/*` path**
+(e.g. `/v1/responses` for reasoning models like muse-spark, `/v1/completions`)
+is raw pass-through with the same key failover — some zen models only answer on
+the OpenAI Responses API, so point Responses-aware clients at the proxy root.
+
 ```bash
 export BASE=https://<service>.onrender.com/v1
 export KEY="Bearer <PROXY_KEY>"
