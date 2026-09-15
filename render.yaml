@@ -1,0 +1,22 @@
+# Render blueprint — deploy with "New +" -> "Blueprint" after pushing this dir to a repo,
+# or import directly: render.com blueprint spec -> select this repo.
+services:
+  - type: web
+    name: zen-proxy
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      # clients must send: Authorization: Bearer <generated value>
+      - key: PROXY_KEY
+        generateValue: true
+      # stable day/week identity across redeploys — set any random string
+      - key: OPENCODE_SECRET
+        generateValue: true
+      # "derived" (default) | "sticky" | "per-request" — see README
+      - key: SESSION_MODE
+        value: derived
+      # key chain tried in order; append your real zen key after "public"
+      # e.g. "public,sk-..." — set it in the Render dashboard, not in git
+      - key: ZEN_API_KEYS
+        value: public
