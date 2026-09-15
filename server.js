@@ -89,10 +89,11 @@ const BODY_LIMIT = 10 * 1024 * 1024
 // UA mimics a real opencode install (per-route, captured from opencode 1.3.0):
 // chat/completions goes through @ai-sdk/openai-compatible, /responses through
 // @ai-sdk/openai. OPENCODE_USER_AGENT overrides both if you need an exact match.
-const UA_SDK_CHAT = process.env.OPENCODE_USER_AGENT?.trim()
-  || "ai-sdk/openai-compatible/1.0.32 ai-sdk/provider-utils/3.0.20 runtime/bun/1.3.10"
-const UA_SDK_RESPONSES = process.env.OPENCODE_USER_AGENT?.trim()
-  || "ai-sdk/openai/2.0.89 ai-sdk/provider-utils/3.0.20 runtime/bun/1.3.10"
+// empirically zen gives the generous free-tier quota only to opencode-looking
+// UAs: ai-sdk/* UAs get instant FreeUsageLimitError 429s while opencode/<ver>
+// sails through (A/B tested 2026-09-15). keep it 2-segment opencode/<version>.
+const UA_SDK_CHAT = process.env.OPENCODE_USER_AGENT?.trim() || "opencode/1.18.18"
+const UA_SDK_RESPONSES = process.env.OPENCODE_USER_AGENT?.trim() || "opencode/1.18.18"
 const UA_OPENCODE = `opencode/${CHANNEL}/${VERSION}/${CLIENT}`
 /** key-level failures worth cooling a key down for; other errors just fail over */
 const KEY_COOLDOWN_STATUS = (s) => s === 429 || s >= 500
