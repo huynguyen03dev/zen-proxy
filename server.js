@@ -49,8 +49,8 @@
  *   SESSION_MODE         "derived" | "sticky" | "per-request"   (default "derived")
  *   SESSION_TTL_MS       sticky idle TTL                (default 1800000)
  *   OPENCODE_PROJECT_ID  static project id (sticky/per-request modes only)
- *   OPENCODE_CLIENT      client tag in headers/UA       (default "tui")
- *   OPENCODE_CHANNEL     UA channel                     (default "dev")
+ *   OPENCODE_CLIENT      x-opencode-client tag          (default "tui")
+ *   OPENCODE_CHANNEL     retained compatibility setting (default "dev")
  *   OPENCODE_VERSION     UA version                     (default "1.18.31")
  *   TIMEOUT_MS           upstream timeout               (default 600000)
  */
@@ -90,11 +90,11 @@ const BODY_LIMIT = 10 * 1024 * 1024
 // chat/completions goes through @ai-sdk/openai-compatible, /responses through
 // @ai-sdk/openai. OPENCODE_USER_AGENT overrides both if you need an exact match.
 // empirically zen gives the generous free-tier quota only to opencode-looking
-// UAs: ai-sdk/* UAs get instant FreeUsageLimitError 429s while opencode/<ver>
-// sails through (A/B tested 2026-09-15). keep it 2-segment opencode/<version>.
-const UA_SDK_CHAT = process.env.OPENCODE_USER_AGENT?.trim() || "opencode/1.18.18"
-const UA_SDK_RESPONSES = process.env.OPENCODE_USER_AGENT?.trim() || "opencode/1.18.18"
-const UA_OPENCODE = `opencode/${CHANNEL}/${VERSION}/${CLIENT}`
+// Zen expects the same two-segment UA used by current opencode LLM requests.
+// OPENCODE_USER_AGENT overrides it when testing a specific installed version.
+const UA_OPENCODE = `opencode/${VERSION}`
+const UA_SDK_CHAT = process.env.OPENCODE_USER_AGENT?.trim() || UA_OPENCODE
+const UA_SDK_RESPONSES = process.env.OPENCODE_USER_AGENT?.trim() || UA_OPENCODE
 /** key-level failures worth cooling a key down for; other errors just fail over */
 const KEY_COOLDOWN_STATUS = (s) => s === 429 || s >= 500
 
@@ -102,13 +102,32 @@ const KEY_COOLDOWN_STATUS = (s) => s === 429 || s >= 500
 // ids
 // ---------------------------------------------------------------------------
 
-const B32 = "0123456789abcdefghjkmnpqrstvwxyz"
+// Same ID shape as opencode's @opencode-ai/schema/identifier:
+// 26 chars = 12 hex chars (timestamp + counter) + 14 random base62 chars.
+const ID_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+let lastIDTimestamp = 0
+let idCounter = 0
 
-function rid(prefix) {
-  const ts = Date.now().toString(16).padStart(12, "0")
-  let r = ""
-  for (let i = 0; i < 10; i++) r += B32[(Math.random() * B32.length) | 0]
-  return `${prefix}_${ts}${r}`
+function identifier(descending = false) {
+  const timestamp = Date.now()
+  if (timestamp !== lastIDTimestamp) {
+    lastIDTimestamp = timestamp
+    idCounter = 0
+  }
+  idCounter++
+  const current = BigInt(timestamp) * 0x1000n + BigInt(idCounter)
+  const value = descending ? ~current : current
+  let time = ""
+  for (let i = 0; i < 6; i++) {
+    time += Number((value >> BigInt(40 - 8 * i)) & 0xffn).toString(16).padStart(2, "0")
+  }
+  let random = ""
+  for (let i = 0; i < 14; i++) random += ID_CHARS[(Math.random() * ID_CHARS.length) | 0]
+  return time + random
+}
+
+function rid(prefix, { descending = false } = {}) {
+  return `${prefix}_${identifier(descending)}`
 }
 
 // identity seed: unique per instance. OPENCODE_SECRET wins if set; otherwise
@@ -138,10 +157,14 @@ function isoWeek(d = new Date()) {
   return `${t.getUTCFullYear()}-W${String(week).padStart(2, "0")}`
 }
 
-/** deterministic bucketed id: HMAC(secret, scope), stable within the bucket */
+/** deterministic bucketed ID with the same shape as opencode IDs. */
 function derivedID(prefix, scope) {
-  const mac = crypto.createHmac("sha256", SECRET).update(scope).digest("base64url")
-  return `${prefix}_${mac.slice(0, 22)}`
+  const mac = crypto.createHmac("sha256", SECRET).update(scope).digest()
+  // opencode IDs are 12 hex chars + 14 base62 chars after the prefix.
+  const time = mac.subarray(0, 6).toString("hex")
+  let random = ""
+  for (let i = 0; i < 14; i++) random += ID_CHARS[mac[6 + i] % ID_CHARS.length]
+  return `${prefix}_${time}${random}`
 }
 
 const STATIC_PROJECT_ID = process.env.OPENCODE_PROJECT_ID?.trim() || rid("proj")
@@ -154,7 +177,7 @@ const sessions = new Map() // sticky mode: conversation key -> { id, at }
 
 function sessionFor(key = "default") {
   if (SESSION_MODE === "derived") return derivedID("ses", `ses:${utcDay()}`)
-  if (SESSION_MODE === "per-request") return rid("ses")
+  if (SESSION_MODE === "per-request") return rid("ses", { descending: true })
   const now = Date.now()
   if (sessions.size > 500) {
     for (const [k, v] of sessions) if (now - v.at > SESSION_TTL_MS) sessions.delete(k)
@@ -229,7 +252,7 @@ function zenHeaders(sessionID, apiKey, ua = UA_SDK_CHAT) {
     "content-type": "application/json",
     "x-opencode-project": projectIDFor(),
     "x-opencode-session": sessionID,
-    "x-opencode-request": rid("req"),
+    "x-opencode-request": rid("msg"),
     "x-opencode-client": CLIENT,
     "user-agent": ua,
   }
@@ -514,7 +537,7 @@ async function handle(req, res) {
       iso_week: isoWeek(),
       project_id: projectIDFor(),
       session_id: sessionFor("default"),
-      request_id: rid("req"),
+      request_id: rid("msg"),
       seed_source: SEED_SOURCE,
       keys: KEYS.map((k, i) => ({ index: i, key: maskKey(k), cooling_until: cooldown.get(i) ?? null })),
       catalog_free: freeSet.size,
