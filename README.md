@@ -1,18 +1,17 @@
 # zen-proxy
 
-Thin OpenAI-compatible proxy in front of [OpenCode Zen](https://opencode.ai) free models.
-One Node.js file (>=20), zero dependencies. Injects the headers the free tier requires
-(`x-opencode-session/-project/-request/-client` + opencode User-Agent, key `public`),
-streams SSE passthrough, blocks non-free models.
+OpenAI/Responses/Anthropic gateway in front of [OpenCode Zen](https://opencode.ai).
+One Node.js file (>=20), zero dependencies. Injects the current OpenCode identity
+headers, preserves client session affinity, shapes anonymous `public` requests like
+an agent (stream + core tools), and translates Anthropic Messages to Chat Completions.
 
 ## Key failover
 
-`ZEN_API_KEYS` là danh sách key thử theo thứ tự (mặc định `"public"`). **Bất kỳ
-lỗi nào** từ upstream (429, 401 với model paid, model không tồn tại, 5xx, lỗi
-mạng…) đều tự thử key tiếp theo **trong cùng request đó**. Riêng lỗi cấp key
-(`429` / `5xx` / lỗi mạng) mới đặt cooldown (`FAILOVER_COOLDOWN_MS`, mặc định
-60s) — lỗi cấp request (vd tên model sai) không làm key bị cool. Hết cooldown
-thì quay lại thử key trước.
+`ZEN_API_KEYS` là danh sách key thử theo thứ tự (mặc định `"public"`). Lỗi auth,
+rate-limit, server và network sẽ failover trong cùng request. Lỗi request
+4xx deterministic (trừ 401/403/429) trả ngay, không làm key bị cool. Cooldown
+exponential tối đa 8x và tôn trọng `Retry-After`; khi có session, thứ tự key
+được hash ổn định để giữ affinity.
 
 ```bash
 ZEN_API_KEYS="public,sk-your-real-key" node server.js   # public trước, key thật dự phòng
@@ -48,7 +47,7 @@ redeploy, no wait. Overrides shape the display list only:
 | `sticky` | one per conversation (`X-Conversation-Id` header / body `user`), 30 min idle TTL | static, random at boot or `OPENCODE_PROJECT_ID` |
 | `per-request` | fresh every call | static |
 
-`x-opencode-request` is always fresh. The seed is **unique per deployment**:
+`x-opencode-request` preserves a canonical client message ID when supplied; otherwise it is fresh. The seed is **unique per deployment**:
 `OPENCODE_SECRET` (if set) → `RENDER_SERVICE_ID` (Render auto-provides, unique
 per service, survives redeploys) → random at boot. Two instances sharing a
 proxy key never share identity. Inspect live values at `GET /debug/ids`
@@ -80,7 +79,9 @@ DEBUG_IDS=1 node server.js                   # log session id per chat request
 | `OPENCODE_SECRET` | `RENDER_SERVICE_ID` / random | manual seed override — on Render leave it unset and each service gets its own stable identity |
 | `ZEN_UPSTREAM` | `https://opencode.ai/zen/v1` | upstream base URL |
 | `ZEN_API_KEYS` | `public` | key chain thử theo thứ tự, phân cách bởi dấu phẩy (fallback: `ZEN_API_KEY`) |
-| `FAILOVER_COOLDOWN_MS` | `60000` | thời gian bỏ qua key vừa fail (0 = tắt) |
+| `FAILOVER_COOLDOWN_MS` | `15000` | cooldown cơ bản; exponential tối đa 8x (0 = tắt) |
+| `RETRY_MAX_ATTEMPTS` | số key | giới hạn attempt trong một request |
+| `ANONYMOUS_SHAPING` | `true` | shape request dùng key `public` thành agent stream |
 | `CATALOG_URL` | `https://models.opencode.ai/api.json` | catalog source (same as opencode) |
 | `CATALOG_PROVIDER` | `opencode` | provider id inside the catalog |
 | `CATALOG_TTL_MS` | `3600000` | catalog refresh interval |
@@ -88,16 +89,24 @@ DEBUG_IDS=1 node server.js                   # log session id per chat request
 | `DEBUG_IDS` | off | log session id on each chat request |
 | `SESSION_TTL_MS` | `1800000` | sticky session idle TTL |
 | `OPENCODE_PROJECT_ID` | random at boot | stable `x-opencode-project` |
-| `OPENCODE_CLIENT` | `tui` | `x-opencode-client` + last UA segment |
-| `OPENCODE_CHANNEL` / `OPENCODE_VERSION` | `dev` / `1.18.31` | UA `opencode/<channel>/<version>/<client>` |
+| `OPENCODE_CLIENT` | `tui` | `x-opencode-client` |
+| `OPENCODE_VERSION` | `1.18.31` | UA `opencode/<version>` |
+| `OPENCODE_USER_AGENT` | auto | override UA khi cần test bản OpenCode cụ thể |
 | `TIMEOUT_MS` | `600000` | upstream request timeout (client disconnects abort upstream) |
 
 ## Use it
 
-`/v1/chat/completions` + `/v1/models` are first-class; **any other `/v1/*` path**
-(e.g. `/v1/responses` for reasoning models like muse-spark, `/v1/completions`)
-is raw pass-through with the same key failover — some zen models only answer on
-the OpenAI Responses API, so point Responses-aware clients at the proxy root.
+First-class routes:
+
+- `/v1/chat/completions` — OpenAI Chat Completions
+- `/v1/responses` — OpenAI Responses pass-through
+- `/v1/messages` — Anthropic Messages bridge via Chat Completions
+- `/v1/models` — display-only free model catalog
+
+Anonymous `public` attempts are sent upstream as streaming agent-shaped requests
+with minimal `bash`, `edit`, `glob`, `grep`, and `read` tools. Non-stream clients
+receive the upstream stream collapsed back to JSON. Authenticated Zen key attempts
+retain the original request body.
 
 ```bash
 export BASE=https://<service>.onrender.com/v1
