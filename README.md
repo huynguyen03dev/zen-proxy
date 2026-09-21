@@ -4,6 +4,8 @@ OpenAI/Responses/Anthropic gateway in front of [OpenCode Zen](https://opencode.a
 One Node.js file (>=20), zero dependencies. Injects the current OpenCode identity
 headers, preserves client session affinity, shapes anonymous `public` requests like
 an agent (stream + core tools), and translates Anthropic Messages to Chat Completions.
+It also passes through OpenCode Zen's typed-decision `/v1/systemone` protocol for
+Jev; System One requests are never reshaped as chat requests.
 
 ## Key failover
 
@@ -101,7 +103,49 @@ First-class routes:
 - `/v1/chat/completions` — OpenAI Chat Completions
 - `/v1/responses` — OpenAI Responses pass-through
 - `/v1/messages` — Anthropic Messages bridge via Chat Completions
+- `/v1/systemone` — TypeSafe/OpenCode Zen System One pass-through (Jev, typed answers; no streaming)
 - `/v1/models` — display-only free model catalog
+
+`jev-1.13-free` is included in the display list even though the upstream pricing
+catalog has not listed it yet. It is **not** a chat model: send `state` and typed
+`questions`, and read the structured `answers` response. This route can be called
+directly from a Python wrapper; CLIProxyAPI's OpenAI-compatible provider does not
+need to know about it.
+
+```python
+import requests
+
+base = "https://zen-proxy-<instance>.onrender.com/v1"
+r = requests.post(
+    f"{base}/systemone",
+    headers={"Authorization": "Bearer <PROXY_KEY>"},
+    json={
+        "model": "jev-1.13-free",
+        "state": "A customer says their payment failed repeatedly.",
+        "questions": {
+            "is_urgent": {
+                "type": "noul",
+                "instructions": "Does this message indicate an urgent issue?",
+            },
+            "department": {
+                "type": "choice",
+                "instructions": "Which team should handle this?",
+                "criteria": {
+                    "billing": "Payment or subscription issues",
+                    "technical": "Bugs or integration problems",
+                    "sales": "Pricing or account questions",
+                },
+            },
+        },
+    },
+    timeout=60,
+)
+r.raise_for_status()
+print(r.json()["answers"])
+```
+
+The upstream endpoint behind this route is `/v1/systemone`; do not send this
+payload to `/v1/chat/completions` or `/v1/responses`.
 
 Anonymous `public` attempts are sent upstream as streaming agent-shaped requests
 with minimal `bash`, `edit`, `glob`, `grep`, and `read` tools. Non-stream clients

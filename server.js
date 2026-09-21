@@ -82,10 +82,15 @@ const SESSION_MODE = ["derived", "sticky", "per-request"].includes(process.env.S
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS ?? 30 * 60_000)
 const TIMEOUT_MS = Number(process.env.TIMEOUT_MS ?? 600_000)
 const ALLOW_MODELS = process.env.ALLOW_MODELS?.trim() || undefined
-const EXTRA_MODELS = (process.env.EXTRA_MODELS ?? "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean)
+const EXTRA_MODELS = [
+  // Jev is free on Zen but is a System One model and is not yet present in
+  // models.opencode.ai's pricing catalog, so keep it visible in /v1/models.
+  "jev-1.13-free",
+  ...(process.env.EXTRA_MODELS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+]
 
 const ALLOW_EXPLICIT = ALLOW_MODELS && ALLOW_MODELS !== "*" ? ALLOW_MODELS.split(",").map((s) => s.trim()) : undefined
 const BODY_LIMIT = 10 * 1024 * 1024
@@ -325,7 +330,9 @@ function anonymousTool(protocol, name) {
 
 /** Normalize public/free requests to the agent-shaped stream Zen expects. */
 function shapeAnonymousBody(raw, protocol = "chat") {
-  if (!ANONYMOUS_SHAPING || raw == null) return raw
+  // System One is a typed-decision protocol, not an agent chat request:
+  // it must keep its state/questions body intact and never receive stream/tools.
+  if (protocol === "systemone" || !ANONYMOUS_SHAPING || raw == null) return raw
   try {
     const payload = JSON.parse(Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw))
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) return raw
@@ -728,7 +735,11 @@ async function passthrough(req, res, upstreamPath) {
   }
   const ids = requestIDs(req, parsedBody)
   const sessionID = ids.sessionID
-  const protocol = upstreamPath.startsWith("/responses") ? "responses" : "chat"
+  const protocol = upstreamPath.startsWith("/responses")
+    ? "responses"
+    : upstreamPath.startsWith("/systemone")
+      ? "systemone"
+      : "chat"
   const ua = upstreamPath.startsWith("/responses") ? UA_SDK_RESPONSES : UA_SDK_CHAT
 
   const ac = new AbortController()
